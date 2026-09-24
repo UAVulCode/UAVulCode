@@ -5,11 +5,24 @@
 ║                                                                      ║
 ║   Pipeline Steps (corrected in V16):                                 ║
 ║   STEP 1  — Load dataset (UAVulDB01 CSV/XLSX)                       ║
-║   STEP 2  — Deduplication (SHA-256 snippet hash)                    ║
+║   STEP 2  — Deduplication: (a) exact SHA-256 snippet hash, then      ║
+║             (b) near-duplicate removal — snippets are parsed into    ║
+║             ASTs with Tree-sitter (literal constants, variable       ║
+║             identifiers and comments stripped) and near-duplicates   ║
+║             are found with MinHash-LSH at a user-set Jaccard         ║
+║             similarity threshold (GUI text box, default 0.90)        ║
+║             STEP 2a export — deduplicated dataset (2a only) saved    ║
+║             to '<base>_Deduplicated_2a.xlsx'                         ║
+║             STEP 2b export — deduplicated dataset (2a+2b) saved      ║
+║             to '<base>_Deduplicated_2b.xlsx'                         ║
 ║   STEP 3  — Split 80% train / 20% test  (Mtag-stratified, shared)  ║
+║   STEP 3b — Export data-split statistics workbook: per-Mtag-class   ║
+║             Total / Train(80%) / Test(20%) breakdown, written to    ║
+║             '<base>_DataSplit_Statistics.xlsx'.                     ║
 ║   STEP 4  — GraphCodeBERT embedding extraction (if R2/R3/R4 needed) ║
 ║             microsoft/graphcodebert-base → [CLS] 768-dim            ║
-║             + 12-dim handcrafted features = 780-dim (for R4)        ║
+║             + 12-dim handcrafted features = 780-dim (for R3 and R4, ║
+║             V17-6c fix — R3 was 768-dim-only through V17-6b)        ║
 ║             Skipped automatically when only Round 1 is selected.    ║
 ║   STEP 5  — Code snippet data note for fine-tuned Rounds 1 & 2     ║
 ║             CB / GCB loaded on-demand inside run_bert_round()        ║
@@ -20,13 +33,21 @@
 ║   STEP 7  — Round 2: GraphCodeBERT Fine-tuned  (from raw snippets) ║
 ║             [CLS] 768 → Linear(768→69) → Softmax                    ║
 ║             2A: Binary  |  2B: Multi-class (69 classes)             ║
-║   STEP 8  — Round 3: GraphCodeBERT + XGBoost (STEP 4, 768-dim)     ║
-║             No handcrafted features — GCB [CLS] 768-dim only        ║
+║   STEP 8  — Round 3: GraphCodeBERT + XGBoost (STEP 4, 780-dim)     ║
+║             GCB [CLS] 768-dim + 12-dim handcrafted = 780-dim        ║
+║             (V17-6c fix — same 780-dim feature space as Round 4,    ║
+║             was 768-dim embedding-only through V17-6b)              ║
 ║             3A: Binary standalone  |  3B: Multi-class flat (69 cls) ║
 ║   STEP 9  — Round 4: Two-Stage Hierarchical XGBoost (STEP 4, 780d) ║
 ║             Stage-1 binary gate → Stage-2 multi-class (Vuln only)  ║
 ║             4A: Binary standalone  |  4B: Multi-class hierarchical  ║
 ║   STEP 10 — Generate PDF report + comparison charts                 ║
+║   STEP 10b— Feature-importance / SHAP analysis for the trained      ║
+║             Round 3B (flat) and Round 4B (hierarchical) XGBoost     ║
+║             Stage-1/Stage-2 models — included in the PDF report.    ║
+║             Uses exact SHAP TreeExplainer attributions when the     ║
+║             optional `shap` package is installed, falling back to   ║
+║             XGBoost's built-in gain importance otherwise.           ║
 ║                                                                      ║
 ║   Key V12 fixes:                                                     ║
 ║     C2: Redundant CB static-extraction step removed — fine-tuned    ║
@@ -39,6 +60,38 @@
 ║     M3: Explicit ValueError when SNIPPET column absent in Step 4.   ║
 ║     M4: Progress budget re-calibrated (rounds start at 32%).        ║
 ║                                                                      ║
+║   Key V17-10 change (STEP 2b methodology):                           ║
+║     STEP 2b now follows the paper's near-duplicate methodology.      ║
+║     Snippets are tokenized into AST representations with             ║
+║     Tree-sitter (pre-order sequence of node types); literal          ║
+║     constants ('LIT'), variable identifiers ('ID') and comments      ║
+║     (dropped) are stripped. Each sequence is split into 5-token      ║
+║     shingles, summarized as a 128-permutation MinHash, and           ║
+║     near-duplicates are found with MinHash Locality-Sensitive        ║
+║     Hashing (LSH) at a Jaccard similarity threshold entered in       ║
+║     the GUI (default 0.90). Every LSH candidate is verified          ║
+║     against its estimated Jaccard similarity before a row is         ║
+║     removed. This replaces the exact canonical-hash match of         ║
+║     V17-6a/b; the V17-6b 'max kept per near-dup cluster'             ║
+║     control is retained.                                             ║
+║     Measured on UAVulDB01 (324,373 rows after 2a) at Jaccard 0.90:   ║
+║     60,357 rows kept at 1/cluster, 79,058 at 2/cluster; all 69       ║
+║     Mtag classes still represented. Lower thresholds remove more     ║
+║     (0.80 -> 36,874; 0.95 -> 73,149 at 1/cluster). Run time is       ║
+║     about 2 min for the full corpus.                                 ║
+║                                                                      ║
+║   Key V17-6c fix (Round 3 feature parity with Round 4):            ║
+║     Round 3A/3B previously trained/tested on the raw 768-dim GCB   ║
+║     [CLS] embedding only, while Round 4A/4B used the 780-dim       ║
+║     embedding + 12-dim handcrafted-feature matrix — so Round 3 vs  ║
+║     Round 4 conflated an architecture difference (flat vs.         ║
+║     hierarchical) with a feature-set difference, undermining any   ║
+║     head-to-head comparison between them. Fix: Round 3A/3B now     ║
+║     train/test on the SAME 780-dim matrix as Round 4 (Xtr_shared / ║
+║     Xte_shared) — the 768-dim-only slice and FEATURE_NAMES_768 are ║
+║     retired. Round 3 vs. Round 4 now isolates the architecture     ║
+║     variable only, both on identical 780-dim input features.       ║
+║                                                                      ║
 ║   Default hyperparameters:                                           ║
 ║     Max tokens = 512  ·  Epochs = 5  ·  Batch = 32  ·  LR = 2e-5  ║
 ║                                                                      ║
@@ -46,6 +99,22 @@
 ║     pip install numpy pandas scikit-learn imbalanced-learn xgboost   ║
 ║     pip install reportlab matplotlib torch transformers accelerate   ║
 ║     pip install openpyxl                                             ║
+║     pip install shap                                                 ║
+║       (STEP 10b — feature-importance / SHAP analysis. Optional:      ║
+║        the pipeline falls back to XGBoost's built-in gain-based      ║
+║        feature_importances_ with a logged warning if `shap` is       ║
+║        missing or TreeExplainer raises at runtime.)                  ║
+║     pip install "tree-sitter==0.21.3" tree-sitter-languages          ║
+║       (STEP 2b — AST tokenization. tree-sitter-languages is          ║
+║        unmaintained and breaks under tree-sitter>=0.22 (Language()   ║
+║        signature change) — the 0.21.3 pin above is required, NOT     ║
+║        optional. Pipeline falls back to a regex tokenizer with a     ║
+║        logged warning if the package is missing or the parser        ║
+║        fails at runtime.)                                            ║
+║     pip install datasketch                                           ║
+║       (STEP 2b — MinHash and MinHashLSH near-duplicate detection.    ║
+║        REQUIRED: STEP 2b stops with an explicit error if it is       ║
+║        not installed.)                                               ║
 ║                                                                      ║
 ║   Run:  python script_V16.py                                         ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -62,6 +131,7 @@ import os
 import sys
 import time
 import re
+import hashlib
 import io
 import warnings
 warnings.filterwarnings("ignore")
@@ -82,6 +152,21 @@ from sklearn.metrics import (accuracy_score, f1_score,
 import xgboost as xgb
 
 # ─────────────────────────────────────────────────────────────────────
+#  SHAP (STEP 10b — feature-importance / explainability analysis).
+#  Optional at import time, mirroring the tree_sitter/datasketch guard
+#  above: if `shap` is missing (or TreeExplainer errors at runtime),
+#  compute_feature_importance() falls back to XGBoost's own gain-based
+#  feature_importances_ with a logged warning, so a missing optional
+#  dependency never blocks a full pipeline run.
+# ─────────────────────────────────────────────────────────────────────
+try:
+    import shap
+    _SHAP_AVAILABLE = True
+except Exception:
+    shap = None
+    _SHAP_AVAILABLE = False
+
+# ─────────────────────────────────────────────────────────────────────
 #  SMOTE (applied to training partition only — post-split)
 # ─────────────────────────────────────────────────────────────────────
 from sklearn.neighbors import NearestNeighbors
@@ -96,6 +181,37 @@ from transformers import AutoTokenizer, AutoModel
 #  Excel I/O (precomputed feature-dataset export / import)
 # ─────────────────────────────────────────────────────────────────────
 import openpyxl
+
+# ─────────────────────────────────────────────────────────────────────
+#  STEP 2b — Tree-sitter AST tokenization + MinHash-LSH near-duplicate
+#  detection. Both third-party dependencies are guarded at import time:
+#    • tree-sitter / tree-sitter-languages — if missing (or broken by a
+#      version mismatch), STEP 2b tokenizes the affected snippets with
+#      a regex fallback and logs a warning, so a run is never blocked.
+#    • datasketch — provides MinHash and MinHashLSH. STEP 2b cannot run
+#      without it: a clear error naming the package is raised at the
+#      start of STEP 2b, before any heavy computation.
+# ─────────────────────────────────────────────────────────────────────
+try:
+    from datasketch import MinHash as _MinHash, MinHashLSH as _MinHashLSH
+    _DATASKETCH_AVAILABLE = True
+except Exception:
+    _MinHash = None
+    _MinHashLSH = None
+    _DATASKETCH_AVAILABLE = False
+
+try:
+    from tree_sitter_languages import get_parser as _ts_get_parser
+    # Import succeeding is not sufficient: tree-sitter-languages is
+    # unmaintained and silently produces a broken parser under
+    # tree-sitter>=0.22 (Language() constructor signature changed).
+    # Smoke-test an actual parse here so a version mismatch is caught
+    # once at startup rather than failing snippet-by-snippet later.
+    _ts_get_parser("c").parse(b"int x;")
+    _TREE_SITTER_AVAILABLE = True
+except Exception:
+    _ts_get_parser = None
+    _TREE_SITTER_AVAILABLE = False
 
 GRAPHCODEBERT_MODEL_NAME = "microsoft/graphcodebert-base"
 CODEBERT_MODEL_NAME      = "microsoft/codebert-base"
@@ -181,6 +297,16 @@ HC_FEATURE_NAMES = [
 ]
 assert len(HC_FEATURE_NAMES) == HC_DIM
 
+# Full ordered feature-name list for model interpretability (feature
+# importance / SHAP, STEP 10b). Order MUST match how the pipeline
+# actually assembles the feature matrix: np.hstack([X_emb, X_hc]) —
+# GCB [CLS] embedding first, then the 12 handcrafted dims (see STEP 4).
+# V17-6c fix: Round 3 (flat) and Round 4 (hierarchical) both train on
+# this same 780-dim matrix now — Round 3 previously used a 768-dim
+# embedding-only matrix (FEATURE_NAMES_768, retired) so that the two
+# rounds differed in feature set as well as architecture.
+FEATURE_NAMES_780 = list(EMB_COLS) + list(HC_FEATURE_NAMES)
+
 _MEM_RE = re.compile(
     r"\b(malloc|calloc|realloc|free|strcpy|strncpy|memcpy|"
     r"memmove|sprintf|gets)\b")
@@ -208,6 +334,323 @@ def extract_handcrafted(snippets: list[str],
             min(s.count("//") + s.count("/*"), 20) / 20,
         ] + lv
     return out
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  STEP 2b — AST TOKENIZATION + MinHash-LSH NEAR-DUPLICATE DEDUP
+#                                                            (V17-10)
+#
+#  UAVulDB01 is assembled from two independent sources (NIST SARD and
+#  NVD/CVE). SARD in particular contains many synthetic variants of
+#  the same underlying test case (differing only by variable/function
+#  names, literal constants, whitespace, or comments). Exact SHA-256
+#  hashing of the raw snippet text (STEP 2a) does not catch these
+#  near-duplicates, which can otherwise leak across the train/test
+#  partition and inflate reported detection performance.
+#
+#  Methodology:
+#    1. Each snippet is parsed into an Abstract Syntax Tree (AST) with
+#       Tree-sitter (grammar chosen from the dataset's FILE TYPE
+#       column: C, C++, Java, PHP).
+#    2. The AST is serialized as a pre-order sequence of node types
+#       (internal and leaf nodes). Literal constants, variable
+#       identifiers, and comments are stripped: every identifier node
+#       becomes the single token 'ID', every literal node becomes the
+#       single token 'LIT', and comment nodes are dropped. Only the
+#       syntactic structure remains, so snippets that differ only in
+#       naming, constants, whitespace, or comments give identical
+#       token sequences.
+#    3. Each token sequence is turned into a set of overlapping
+#       k-token shingles (k = MINHASH_SHINGLE_K) and summarized by a
+#       MinHash signature with MINHASH_NUM_PERM permutations.
+#    4. Near-duplicates are found with MinHash Locality-Sensitive
+#       Hashing (LSH) at a Jaccard-similarity threshold entered in the
+#       GUI (default JACCARD_THRESHOLD_DEFAULT = 0.90). LSH proposes
+#       candidate pairs; each candidate is then verified against the
+#       Jaccard similarity estimated from the two MinHash signatures,
+#       and only pairs at or above the threshold count as near-
+#       duplicates. Because every candidate is verified, the LSH banding
+#       is tuned for recall (datasketch weights favouring false
+#       negatives over false positives, see LSH_FP_FN_WEIGHTS): with
+#       datasketch's default balanced weights only ~30% of pairs sitting
+#       exactly at a 0.90 threshold would even be proposed.
+#    5. Rows are processed in file order. A row with no near-duplicate
+#       among the earlier cluster representatives starts a new cluster
+#       and becomes its representative (inserted into the LSH index).
+#       Any other row joins the cluster of its most similar
+#       representative. The first `max_keep_per_cluster` rows of every
+#       cluster are kept and the rest are dropped — before the
+#       train/test split, so near-duplicates cannot straddle it
+#       (strictly so for max_keep_per_cluster = 1).
+#
+#  If tree_sitter_languages is unavailable (or a snippet's FILE TYPE
+#  has no grammar here), a regex-based fallback tokenizer applies the
+#  same 'ID' / 'LIT' / comment-stripping scheme to a regex token
+#  stream instead of an AST, with a logged warning.
+# ═══════════════════════════════════════════════════════════════════
+
+# GUI default for the Jaccard-similarity threshold (user-editable).
+JACCARD_THRESHOLD_DEFAULT = 0.90
+# MinHash / shingling settings (fixed; not exposed in the GUI).
+MINHASH_NUM_PERM   = 128   # permutations per MinHash signature
+MINHASH_SHINGLE_K  = 5     # tokens per shingle
+# datasketch (false-positive, false-negative) weights used to pick the
+# LSH band/row split. Candidates are verified afterwards, so false
+# positives are cheap and false negatives are what must be avoided.
+LSH_FP_FN_WEIGHTS  = (0.05, 0.95)
+# datasketch cannot build an LSH index above ~0.98 with 128 permutations
+# ("number of bands too small"); the LSH candidate threshold is capped
+# here while the verification step still enforces the exact user value.
+LSH_MAX_THRESHOLD  = 0.99
+
+# Dataset FILE TYPE values → Tree-sitter grammar name. Anything not
+# listed here (e.g. Python, JS, or unlabeled entries) falls back to the
+# regex tokenizer, since a mismatched grammar would silently mis-parse
+# the snippet rather than raise.
+_TS_LANG_MAP = {
+    "C": "c",
+    "CPP": "cpp", "C++": "cpp",
+    "JAVA": "java", "Java": "java",
+    "PHP": "php",
+}
+
+# AST node types replaced by the single token 'ID' (variable / function /
+# type / field / label names — all identifier-like leaves).
+_TS_IDENTIFIER_NODES = {
+    "identifier", "field_identifier", "type_identifier",
+    "namespace_identifier", "statement_identifier",
+    "property_identifier", "name",
+}
+# AST node types replaced by the single token 'LIT' (literal constants).
+# Any node type ending in '_literal' (number_literal, string_literal,
+# char_literal, character_literal, hex_integer_literal, null_literal, …)
+# is also treated as a literal — see `_ast_canonical_tokens`.
+_TS_LITERAL_NODES = {
+    "number_literal", "integer", "float",
+    "decimal_integer_literal", "decimal_floating_point_literal",
+    "string_literal", "concatenated_string", "string", "encapsed_string",
+    "char_literal", "character_literal",
+    "true", "false", "boolean", "null",
+}
+_TS_COMMENT_NODES = {"comment", "line_comment", "block_comment"}
+
+# Regex-fallback keyword set — kept as literal tokens (not replaced by
+# 'ID') since they carry structural meaning, not identity.
+_C_KEYWORDS = {
+    "if", "else", "for", "while", "do", "switch", "case", "break",
+    "continue", "return", "goto", "default", "struct", "union",
+    "enum", "typedef", "sizeof", "static", "const", "void", "int",
+    "char", "long", "short", "unsigned", "signed", "float",
+    "double", "class", "public", "private", "protected", "new",
+    "delete", "try", "catch", "throw", "namespace", "template",
+    "using", "virtual", "this", "null", "true", "false",
+}
+
+_ts_parser_cache = {}
+
+
+def _get_cached_ts_parser(lang_key):
+    """Lazily instantiate and cache a Tree-sitter parser per language."""
+    if lang_key not in _ts_parser_cache:
+        try:
+            _ts_parser_cache[lang_key] = _ts_get_parser(lang_key)
+        except Exception:
+            _ts_parser_cache[lang_key] = None
+    return _ts_parser_cache[lang_key]
+
+
+def _ast_canonical_tokens(snippet: str, file_type: str) -> tuple[list[str], bool]:
+    """
+    Parse `snippet` with Tree-sitter and return (token sequence,
+    used_ast).
+
+    The AST is serialized as a pre-order sequence of node types
+    (internal and leaf nodes). Variable identifiers are replaced by the
+    single token 'ID', literal constants by the single token 'LIT', and
+    comments are dropped, so only the syntactic structure remains. The
+    traversal is iterative (explicit stack) so deeply nested
+    expressions cannot hit Python's recursion limit.
+
+    Falls back to a regex tokenizer (same 'ID' / 'LIT' / comment-
+    stripping scheme) if Tree-sitter or the matching grammar is
+    unavailable, or parsing fails for this particular snippet, so
+    near-duplicate detection degrades gracefully rather than crashing
+    STEP 2. `used_ast` reports which path actually ran for this
+    snippet, so the caller can log real fallback usage rather than just
+    import status.
+    """
+    lang_key = _TS_LANG_MAP.get(str(file_type).strip())
+    if _TREE_SITTER_AVAILABLE and lang_key is not None:
+        parser = _get_cached_ts_parser(lang_key)
+        if parser is not None:
+            try:
+                tree = parser.parse(bytes(snippet, "utf-8", errors="replace"))
+                tokens = []
+                stack = [tree.root_node]
+                while stack:
+                    node = stack.pop()
+                    ntype = node.type
+                    if ntype in _TS_COMMENT_NODES:
+                        continue                      # comments stripped
+                    if ntype in _TS_IDENTIFIER_NODES:
+                        tokens.append("ID")           # identifiers stripped
+                        continue
+                    if ntype in _TS_LITERAL_NODES or ntype.endswith("_literal"):
+                        tokens.append("LIT")          # literals stripped
+                        continue
+                    tokens.append(ntype)              # structural node type
+                    if node.child_count:
+                        stack.extend(reversed(node.children))
+                if tokens:
+                    return tokens, True
+            except Exception:
+                pass  # fall through to regex fallback below
+
+    # ── Regex fallback tokenizer ─────────────────────────────────
+    # Drops // and /* */ comments, replaces string/char/numeric
+    # literals by 'LIT', replaces identifier-shaped words (other than
+    # keywords) by 'ID', then tokenizes on whitespace/punctuation
+    # boundaries. Coarser than a real AST walk but keeps STEP 2b
+    # functional without Tree-sitter.
+    s = re.sub(r"/\*.*?\*/", " ", snippet, flags=re.S)
+    s = re.sub(r"//.*", " ", s)
+    s = re.sub(r'"(?:\\.|[^"\\])*"', " LIT ", s)
+    s = re.sub(r"'(?:\\.|[^'\\])*'", " LIT ", s)
+    s = re.sub(r"\b(?:0[xX][0-9a-fA-F]+|\d+\.?\d*(?:[eE][+-]?\d+)?)"
+               r"[uUlLfF]*\b", " LIT ", s)
+    raw_tokens = re.findall(r"[A-Za-z_]\w*|[^\sA-Za-z_\w]", s)
+    tokens = [
+        t if (t in _C_KEYWORDS or t == "LIT" or not t.isidentifier())
+        else "ID"
+        for t in raw_tokens
+    ]
+    return tokens, False
+
+
+def _shingle_set(tokens: list[str], k: int) -> set:
+    """Set of overlapping k-token shingles. A sequence shorter than k
+    yields a single shingle (the whole sequence), so very short
+    snippets still get a non-empty signature."""
+    if len(tokens) < k:
+        return {" ".join(tokens)}
+    return {" ".join(tokens[i:i + k]) for i in range(len(tokens) - k + 1)}
+
+
+def _minhash_signature(tokens: list[str], num_perm: int, k: int):
+    """MinHash signature (datasketch) of the token sequence's k-shingle
+    set. Seeded with the module-level SEED, so signatures — and hence
+    the dedup result — are reproducible run to run."""
+    sig = _MinHash(num_perm=num_perm, seed=SEED)
+    data = [s.encode("utf-8") for s in _shingle_set(tokens, k)]
+    if hasattr(sig, "update_batch"):
+        sig.update_batch(data)
+    else:                       # older datasketch releases
+        for d in data:
+            sig.update(d)
+    return sig
+
+
+def ast_minhash_lsh_dedup(snippets: list[str], file_types: list[str],
+                           jaccard_threshold: float = JACCARD_THRESHOLD_DEFAULT,
+                           progress_cb=None, mtags=None, btags=None,
+                           max_keep_per_cluster: int = 2,
+                           num_perm: int = MINHASH_NUM_PERM,
+                           shingle_k: int = MINHASH_SHINGLE_K):
+    """
+    STEP 2b (V17-10): near-duplicate removal. Snippets are tokenized
+    into AST representations with Tree-sitter (literal constants,
+    variable identifiers and comments stripped — see
+    `_ast_canonical_tokens`), and near-duplicate code blocks are
+    identified with MinHash Locality-Sensitive Hashing (LSH) at the
+    given Jaccard-similarity threshold (GUI default 0.90).
+
+    Returns (keep_mask, n_removed, n_ast_used, n_label_conflicts):
+      - keep_mask          : bool array, True = keep row, aligned to
+                              `snippets`
+      - n_removed          : count of rows dropped as near-duplicates
+      - n_ast_used         : count of rows tokenized via the real
+                              Tree-sitter AST walk (vs. the regex
+                              fallback), so the caller can log actual
+                              runtime coverage rather than trusting
+                              import-time availability alone
+      - n_label_conflicts  : count of dropped rows whose Btag/Mtag
+                              label differs from that of their cluster
+                              representative (0 if `mtags`/`btags` not
+                              supplied) — a diagnostic signal of
+                              possible source-annotation noise; it does
+                              not change dedup behaviour, it only
+                              surfaces the count.
+
+    Matching. Rows are processed in file order. For each row the LSH
+    index (which holds cluster *representatives* only) proposes
+    candidates; every candidate is verified by the Jaccard similarity
+    estimated from the two MinHash signatures (>= `jaccard_threshold`),
+    and the most similar verified representative (ties → earliest row)
+    is the row's cluster. With no verified candidate the row becomes a new
+    representative. Similarity is therefore always measured against a
+    cluster's representative, not chained through other members.
+
+    Thinning. The first `max_keep_per_cluster` rows of each cluster
+    (the representative included) are kept and every later row is
+    dropped. Pass 1 for strict single-survivor-per-cluster removal;
+    higher values keep more duplicate volume for scarce classes at the
+    cost of possible train/test leakage if a cluster straddles the
+    later split.
+    """
+    if not _DATASKETCH_AVAILABLE:
+        raise RuntimeError(
+            "STEP 2b (MinHash-LSH near-duplicate removal) requires the "
+            "'datasketch' package, which is not installed.\n"
+            "Install it with:  pip install datasketch")
+    jaccard_threshold = float(jaccard_threshold)
+    if not (0.0 < jaccard_threshold <= 1.0):
+        raise ValueError("Jaccard similarity threshold must be in the "
+                         f"range (0, 1]; got {jaccard_threshold}.")
+
+    n = len(snippets)
+    keep = np.ones(n, dtype=bool)
+    # Candidate generation: LSH threshold is capped at LSH_MAX_THRESHOLD
+    # (datasketch limitation); the verification step below enforces the
+    # exact user-set threshold, including 1.00 (identical AST shingle
+    # sets — MinHash estimate exactly 1.0).
+    lsh = _MinHashLSH(threshold=min(jaccard_threshold, LSH_MAX_THRESHOLD),
+                      num_perm=num_perm, weights=LSH_FP_FN_WEIGHTS)
+    rep_sig = {}    # representative row index -> its MinHash signature
+    rep_kept = {}   # representative row index -> cluster rows kept so far
+    n_removed = 0
+    n_ast_used = 0
+    n_label_conflicts = 0
+    have_labels = mtags is not None and btags is not None
+    eps = 1e-12     # float-comparison guard (estimates are k/num_perm)
+
+    for i, (snippet, ftype) in enumerate(zip(snippets, file_types)):
+        tokens, used_ast = _ast_canonical_tokens(str(snippet), ftype)
+        n_ast_used += int(used_ast)
+        sig = _minhash_signature(tokens, num_perm, shingle_k)
+
+        best, best_j = None, -1.0
+        for cand in lsh.query(sig):
+            j = sig.jaccard(rep_sig[cand])
+            if j + eps >= jaccard_threshold and (
+                    j > best_j or (j == best_j and cand < best)):
+                best, best_j = cand, j
+
+        if best is None:                       # new cluster
+            lsh.insert(i, sig)
+            rep_sig[i] = sig
+            rep_kept[i] = 1
+        elif rep_kept[best] < max_keep_per_cluster:
+            rep_kept[best] += 1                # near-dup, still within quota
+        else:                                  # near-dup beyond quota → drop
+            keep[i] = False
+            n_removed += 1
+            if have_labels and (mtags[i] != mtags[best]
+                                or btags[i] != btags[best]):
+                n_label_conflicts += 1
+
+        if progress_cb is not None and (i + 1) % 500 == 0:
+            progress_cb(i + 1, n)
+    return keep, n_removed, n_ast_used, n_label_conflicts
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -874,6 +1317,105 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  STEP 10b — FEATURE IMPORTANCE / SHAP ANALYSIS
+#
+#  Global explainability for the trained Stage-1 (binary gate) and
+#  Stage-2 (multi-class CWE head) XGBoost models. Addresses the
+#  reviewer-flagged limitation that earlier pipeline versions reported
+#  detection metrics with no accompanying feature-importance or SHAP
+#  analysis.
+#
+#  compute_feature_importance() prefers exact SHAP TreeExplainer
+#  attributions (mean |SHAP value| per feature, averaged across the
+#  sampled test rows and, for multi-class heads, across classes too).
+#  If the optional `shap` package is unavailable or TreeExplainer
+#  raises at runtime, it falls back to XGBoost's own gain-based
+#  `feature_importances_` (normalised to sum to 1) so a missing
+#  optional dependency never blocks report generation — the PDF simply
+#  labels which of the two methods produced the numbers shown.
+# ═══════════════════════════════════════════════════════════════════
+def compute_feature_importance(model, X: np.ndarray,
+                               feature_names: list[str],
+                               max_samples: int = 400, top_n: int = 15,
+                               seed: int = SEED) -> dict:
+    """Global feature-importance for one trained XGBoost model.
+
+    Returns:
+      method      "shap" | "xgboost_gain" | "none" (no rows to explain)
+      n_samples   rows actually used for the attribution
+      ranked      [(feature_name, importance), ...] sorted descending
+      top         ranked[:top_n]
+    """
+    n = 0 if X is None else X.shape[0]
+    if n == 0 or model is None:
+        return {"method": "none", "n_samples": 0, "ranked": [], "top": []}
+
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(n, size=min(max_samples, n), replace=False)
+    Xs  = X[idx]
+
+    if _SHAP_AVAILABLE:
+        try:
+            explainer = shap.TreeExplainer(
+                model, feature_perturbation="tree_path_dependent")
+            sv = explainer.shap_values(Xs)
+            # The SHAP API has returned several shapes across versions
+            # for multi-class tree models — normalise all of them into
+            # a single (n_samples, n_features) |importance| matrix by
+            # averaging the absolute attribution across the class axis.
+            if isinstance(sv, list):
+                # Older API: list of (n, f) arrays, one per class.
+                abs_stack = np.mean([np.abs(a) for a in sv], axis=0)
+            else:
+                sv = np.asarray(sv)
+                if sv.ndim == 3:
+                    # Newer API: (n, f, n_classes) — class axis is
+                    # whichever axis is neither samples nor features.
+                    class_axis = int(np.argmin(sv.shape))
+                    abs_stack = np.mean(np.abs(sv), axis=class_axis)
+                else:
+                    abs_stack = np.abs(sv)
+            importance = np.asarray(abs_stack).mean(axis=0).ravel()
+            ranked = sorted(zip(feature_names, importance.tolist()),
+                            key=lambda t: t[1], reverse=True)
+            return {"method": "shap", "n_samples": int(len(Xs)),
+                    "ranked": ranked, "top": ranked[:top_n]}
+        except Exception:
+            pass   # fall through to the gain-based fallback below
+
+    gains = np.asarray(
+        getattr(model, "feature_importances_",
+               np.zeros(len(feature_names))), dtype=float)
+    if gains.sum() > 0:
+        gains = gains / gains.sum()
+    ranked = sorted(zip(feature_names, gains.tolist()),
+                    key=lambda t: t[1], reverse=True)
+    return {"method": "xgboost_gain", "n_samples": int(len(Xs)),
+            "ranked": ranked, "top": ranked[:top_n]}
+
+
+def group_feature_importance(ranked: list, groups: dict) -> dict:
+    """Aggregate a ranked (name, importance) list into named groups.
+
+    `groups` maps a group label to a predicate(feature_name) -> bool.
+    Returns {label: fraction_of_total_importance}, renormalised so the
+    provided groups sum to 1.0 (used to compare the semantic
+    GraphCodeBERT-embedding dims against the handcrafted structural
+    dims in the 780-dim Round-4 feature space).
+    """
+    totals = {label: 0.0 for label in groups}
+    for name, val in ranked:
+        for label, pred in groups.items():
+            if pred(name):
+                totals[label] += val
+                break
+    grand = sum(totals.values())
+    if grand > 0:
+        totals = {k: v / grand for k, v in totals.items()}
+    return totals
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  TWO-STAGE XGBOOST CLASSIFIER
 #
 #  Stage 1: Binary XGBoost (Benign vs. Vulnerable)
@@ -1352,6 +1894,167 @@ class MLEngine:
             self.log(f"⚠️  Feature-dataset export failed (continuing "
                      f"pipeline without it): {exc}", "warn")
 
+    def _export_dedup_dataset(self, df, csv_path, stage, pct):
+        """
+        Save the current in-progress deduplicated dataframe to
+        '<base>_Deduplicated_<stage>.xlsx' so the intermediate dataset
+        can be downloaded, inspected, or reloaded outside the pipeline.
+
+        stage : "2a" — right after exact-hash (SHA-256) dedup only.
+                "2b" — after exact-hash dedup *and* Tree-sitter AST +
+                       MinHash-LSH near-duplicate removal (the full
+                       STEP 2 result; V17-10).
+
+        All of df's current columns are written as-is (SNIPPET,
+        FILE TYPE, Btags, Mtags, CWE DESCRIPTION for the raw-CSV path;
+        the embedding + Mtags/Btags columns for the precomputed-feature
+        path) — so this works for either STEP 1 loading mode.
+
+        Non-fatal, same pattern as the other _export_* helpers: a
+        failure here logs a warning and the pipeline continues.
+        """
+        try:
+            self.log("━" * 58)
+            self.log(f"💾  STEP {stage} export — Saving deduplicated "
+                     f"dataset …")
+            self.progress(pct, f"Exporting deduplicated dataset ({stage}) …")
+            self.check_stop()
+
+            out_dir  = os.path.dirname(csv_path) or "."
+            base     = os.path.splitext(os.path.basename(csv_path))[0]
+            out_path = os.path.join(
+                out_dir, f"{base}_Deduplicated_{stage}.xlsx")
+
+            cols = list(df.columns)
+            n = len(df)
+
+            wb = openpyxl.Workbook(write_only=True)
+            ws = wb.create_sheet("Sheet1")
+            ws.append(cols)
+            chunk = 2000
+            for i, row in enumerate(df[cols].itertuples(index=False,
+                                                          name=None)):
+                ws.append(list(row))
+                if (i + 1) % chunk == 0:
+                    self.check_stop()
+
+            wb.save(out_path)
+            self.results[f"dedup_{stage}_dataset_path"] = out_path
+            self.log(f"   Deduplicated ({stage}) dataset: {out_path}  "
+                     f"({n:,} rows × {len(cols)} cols)")
+
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self.log(f"⚠️  Deduplicated-dataset export ({stage}) failed "
+                     f"(continuing pipeline without it): {exc}", "warn")
+
+    def _export_datasplit_statistics(self, le_m, y_m, idx_tr, idx_te,
+                                      csv_path):
+        """
+        STEP 3b — Export a per-Mtag-class breakdown of the STEP 3
+        80%/20% split to '<base>_DataSplit_Statistics.xlsx'.
+
+        Columns : CWE-ID / class | Total | Train (80%) | Test (20%)
+        Rows    : one row per Mtag class (Benign + each CWE-ID), in the
+                  same order as le_m.classes_ (lexicographic — Benign
+                  sorts first), followed by a bold 'Total (N classes)'
+                  summary row.
+
+        This is a lightweight, non-fatal export (same pattern as
+        _export_feature_dataset / _export_cb_feature_dataset above):
+        a failure here logs a warning and lets the rest of the
+        pipeline continue rather than aborting the run.
+        """
+        try:
+            from openpyxl.styles import Font, Alignment
+
+            self.log("━" * 58)
+            self.log("📊  STEP 3b — Generating data-split statistics "
+                     "workbook …")
+            self.progress(12, "Exporting data-split statistics (.xlsx) …")
+            self.check_stop()
+
+            out_dir  = os.path.dirname(csv_path) or "."
+            base     = os.path.splitext(os.path.basename(csv_path))[0]
+            out_path = os.path.join(
+                out_dir, f"{base}_DataSplit_Statistics.xlsx")
+
+            y_m_tr = y_m[idx_tr]
+            y_m_te = y_m[idx_te]
+            n_classes = len(le_m.classes_)
+
+            header_font = Font(name="Times New Roman", size=8, bold=True,
+                                underline="single", color="FF008080")
+            body_font   = Font(name="Times New Roman", size=8, bold=False,
+                                underline="single", color="FF008080")
+            total_font  = Font(name="Times New Roman", size=8, bold=True,
+                                underline="single", color="FF008080")
+            cell_align  = Alignment(horizontal="left", vertical="center",
+                                     wrap_text=True)
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Sheet1"
+
+            headers = ["CWE-ID / class", "Total", "Train (80%)",
+                       "Test (20%)"]
+            ws.append(headers)
+            for col in range(1, 5):
+                c = ws.cell(row=1, column=col)
+                c.font = header_font
+                c.alignment = cell_align
+            ws.row_dimensions[1].height = 21.0
+
+            tot_total = tot_train = tot_test = 0
+            for r, cls_name in enumerate(le_m.classes_, start=2):
+                cls_idx = np.where(le_m.classes_ == cls_name)[0][0]
+                total = int(np.sum(y_m == cls_idx))
+                train = int(np.sum(y_m_tr == cls_idx))
+                test  = int(np.sum(y_m_te == cls_idx))
+                tot_total += total
+                tot_train += train
+                tot_test  += test
+                ws.cell(row=r, column=1, value=str(cls_name))
+                ws.cell(row=r, column=2, value=total)
+                ws.cell(row=r, column=3, value=train)
+                ws.cell(row=r, column=4, value=test)
+                for col in range(1, 5):
+                    c = ws.cell(row=r, column=col)
+                    c.font = body_font
+                    c.alignment = cell_align
+                ws.row_dimensions[r].height = 15.0
+
+            total_row = n_classes + 2
+            ws.cell(row=total_row, column=1,
+                    value=f"Total ({n_classes} classes)")
+            ws.cell(row=total_row, column=2, value=tot_total)
+            ws.cell(row=total_row, column=3, value=tot_train)
+            ws.cell(row=total_row, column=4, value=tot_test)
+            for col in range(1, 5):
+                c = ws.cell(row=total_row, column=col)
+                c.font = total_font
+                c.alignment = cell_align
+            ws.row_dimensions[total_row].height = 15.0
+
+            ws.column_dimensions["A"].width = 27.44140625
+            ws.column_dimensions["B"].width = 12.0
+            ws.column_dimensions["C"].width = 40.0
+            ws.column_dimensions["D"].width = 24.21875
+
+            wb.save(out_path)
+            self.results["datasplit_statistics_path"] = out_path
+            self.log(f"   Data-split stats  : {out_path}  "
+                     f"({n_classes} Mtag classes, "
+                     f"{tot_total:,} total / {tot_train:,} train / "
+                     f"{tot_test:,} test)")
+
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self.log(f"⚠️  Data-split statistics export failed "
+                     f"(continuing pipeline without it): {exc}", "warn")
+
     # ── figure helpers (identical to original) ──────────────────
     def _bar_chart(self, title, labels, values, colours,
                    xlabel="", ylabel="Value"):
@@ -1424,6 +2127,159 @@ class MLEngine:
                   edgecolor="#3A3F5C", labelcolor="#E8EAF6")
         plt.tight_layout()
         return fig
+
+    # ── STEP 10b — feature-importance / SHAP chart helpers ────────
+    def _feature_importance_chart(self, title, feat_names, values,
+                                  xlabel="Mean |SHAP value|"):
+        """Horizontal bar chart of top-N feature importances, styled
+        to match _bar_chart()/_metric_bar()'s dark theme."""
+        if not feat_names:
+            feat_names, values = ["(no test rows available)"], [0.0]
+        order = np.argsort(values)   # ascending -> barh reads top-down
+        names = [feat_names[i] for i in order]
+        vals  = [values[i] for i in order]
+        vmax  = max(vals) if vals else 1.0
+
+        fig, ax = plt.subplots(
+            figsize=(8, max(3.5, 0.34 * len(names) + 1)))
+        fig.patch.set_facecolor("#1E2233")
+        ax.set_facecolor("#252840")
+        bars = ax.barh(names, vals, color=ACCENT_TEAL,
+                       edgecolor="#4A4F7A", linewidth=0.6, height=0.62)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_width() + vmax * 0.015,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{v:.4f}", va="center", ha="left",
+                    color="#E8EAF6", fontsize=7.5)
+        ax.set_xlim(0, vmax * 1.18 if vmax > 0 else 1)
+        ax.set_title(title, color="#E8EAF6", fontsize=10.5,
+                     fontweight="bold", pad=10)
+        ax.set_xlabel(xlabel, color="#8892B0", fontsize=9)
+        ax.tick_params(colors="#8892B0", labelsize=7.5)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#3A3F5C")
+        ax.xaxis.grid(True, color="#3A3F5C", linewidth=0.4, linestyle="--")
+        ax.set_axisbelow(True)
+        plt.tight_layout()
+        return fig
+
+    def _group_importance_chart(self, title, group_fracs: dict):
+        """Semantic-embedding vs. handcrafted-structural share of a
+        Stage-2 model's total SHAP/gain importance. Produced for any
+        round whose feature_names include handcrafted ('hc_'-prefixed)
+        columns — as of the V17-6c fix that is both Round 3 (flat) and
+        Round 4 (hierarchical), since both now train on the same
+        780-dim (768 GCB + 12 handcrafted) feature matrix."""
+        labels = list(group_fracs.keys())
+        values = [group_fracs[k] * 100 for k in labels]
+        colours = [ACCENT_BLUE, ACCENT_AMBER, ACCENT_GREEN,
+                  ACCENT_RED][:len(labels)]
+
+        fig, ax = plt.subplots(figsize=(8, 3.2))
+        fig.patch.set_facecolor("#1E2233")
+        ax.set_facecolor("#252840")
+        bars = ax.barh(labels, values, color=colours,
+                       edgecolor="#4A4F7A", linewidth=0.6, height=0.5)
+        for bar, v in zip(bars, values):
+            ax.text(bar.get_width() + 1.2,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{v:.1f}%", va="center", ha="left",
+                    color="#E8EAF6", fontsize=9, fontweight="bold")
+        ax.set_xlim(0, max(values) * 1.3 if values else 1)
+        ax.set_title(title, color="#E8EAF6", fontsize=10.5,
+                     fontweight="bold", pad=10)
+        ax.set_xlabel("Share of total Stage-2 importance (%)",
+                     color="#8892B0", fontsize=9)
+        ax.tick_params(colors="#8892B0", labelsize=8.5)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#3A3F5C")
+        plt.tight_layout()
+        return fig
+
+    def _run_feature_importance_analysis(self, clf, Xte, y_b_te,
+                                         feature_names, tag, result_key,
+                                         mode, pct=None):
+        """STEP 10b — explain a trained TwoStageXGBoost model.
+
+        mode="hierarchical" (Round 4B): Stage-2 was trained on
+          Vulnerable rows only, so it is explained on the Vulnerable
+          subset of Xte (matching its training/inference distribution).
+        mode="flat" (Round 3B): Stage-2 was trained on ALL rows
+          (Benign included), so it is explained on the full Xte sample.
+
+        Stores a compact numeric + figure summary in
+        self.results[f"{result_key}_shap"] for the PDF report. Does
+        NOT append to self.figures — the PDF reporter pulls the figures
+        directly out of that results entry so each SMOTE/no-SMOTE
+        variant's charts land next to that variant's own metrics
+        instead of a shared/ambiguous title match.
+        """
+        self.check_stop()
+        method_label = ("SHAP TreeExplainer" if _SHAP_AVAILABLE
+                        else "XGBoost gain importance (shap not installed)")
+        self.log(f"     Feature importance : explaining {tag}  "
+                 f"[{method_label}] …")
+        if pct is not None:
+            self.progress(pct, f"{tag} – feature importance …")
+
+        stage1_imp = compute_feature_importance(
+            clf.stage1, Xte, feature_names)
+
+        vuln_mask = y_b_te == 1
+        X_stage2  = Xte if mode == "flat" else Xte[vuln_mask]
+        stage2_imp = compute_feature_importance(
+            clf.stage2, X_stage2, feature_names)
+
+        fig_s1 = self._feature_importance_chart(
+            f"{tag} — Stage-1 (binary gate) feature importance",
+            [n for n, _ in stage1_imp["top"]],
+            [v for _, v in stage1_imp["top"]])
+        fig_s2 = self._feature_importance_chart(
+            f"{tag} — Stage-2 (multi-class) feature importance",
+            [n for n, _ in stage2_imp["top"]],
+            [v for _, v in stage2_imp["top"]])
+
+        group_fracs, fig_grp = None, None
+        if any(n.startswith("hc_") for n in feature_names) and \
+                stage2_imp["ranked"]:
+            groups = {
+                "Semantic — GraphCodeBERT embedding (768-dim)":
+                    lambda n: n.startswith("gcb_emb"),
+                "Structural — handcrafted features (12-dim)":
+                    lambda n: n.startswith("hc_"),
+            }
+            group_fracs = group_feature_importance(
+                stage2_imp["ranked"], groups)
+            fig_grp = self._group_importance_chart(
+                f"{tag} — Stage-2 feature-group contribution",
+                group_fracs)
+
+        if stage1_imp["top"]:
+            self.log(f"       Stage-1 top feature : "
+                     f"{stage1_imp['top'][0][0]} "
+                     f"({stage1_imp['top'][0][1]:.4f})")
+        if stage2_imp["top"]:
+            self.log(f"       Stage-2 top feature : "
+                     f"{stage2_imp['top'][0][0]} "
+                     f"({stage2_imp['top'][0][1]:.4f})")
+        if group_fracs:
+            parts = "  |  ".join(
+                f"{k.split('—')[0].strip()}: {v*100:.1f}%"
+                for k, v in group_fracs.items())
+            self.log(f"       Feature-group split : {parts}")
+
+        self.results[f"{result_key}_shap"] = {
+            "method":           stage1_imp["method"],
+            "tag":              tag,
+            "stage1_n_samples": stage1_imp["n_samples"],
+            "stage2_n_samples": stage2_imp["n_samples"],
+            "stage1_top":       stage1_imp["top"],
+            "stage2_top":       stage2_imp["top"],
+            "group_importance": group_fracs,
+            "fig_stage1":       fig_s1,
+            "fig_stage2":       fig_s2,
+            "fig_group":        fig_grp,
+        }
 
     # ── main entry ──────────────────────────────────────────────
     def run(self):
@@ -1500,11 +2356,25 @@ class MLEngine:
         self.log(f"   Multi-classes(raw): {mtag_raw_n}")
 
         # ── 2. DEDUP ────────────────────────────────────────────
+        # UAVulDB01 was assembled from two independent sources (NIST
+        # SARD and NVD/CVE). Because SARD in particular contributes many
+        # synthetic near-variants of the same underlying test case,
+        # dedup runs in two passes: (2a) exact SHA-256 hash removal,
+        # then (2b) near-duplicate removal: snippets are tokenized into
+        # AST representations with Tree-sitter (literal constants,
+        # variable identifiers and comments stripped) and near-
+        # duplicates are identified with MinHash-LSH at the Jaccard-
+        # similarity threshold set in the GUI (default 0.90) — see the
+        # module-level comment above `ast_minhash_lsh_dedup` — so that
+        # functions that differ only by renamed identifiers, changed
+        # literal constants, whitespace, or comments cannot leak across
+        # the later train/test split.
         self.log("━" * 58)
         self.log("🔄  STEP 2 — Deduplication …")
         self.progress(6, "Deduplicating …")
         self.check_stop()
 
+        # ── 2a. Exact-hash dedup ──────────────────────────────
         if use_pre:
             # S2 FIX: deduplicate on a hash of the original SNIPPET rather
             # than on the float embedding columns. Two semantically identical
@@ -1520,7 +2390,7 @@ class MLEngine:
                 df = (df.drop_duplicates(subset=["snippet_hash"])
                         .dropna(subset=["Mtags", "Btags"])
                         .reset_index(drop=True))
-                self.log("   Dedup method      : snippet_hash (S2 fix — "
+                self.log("   Dedup method (2a) : snippet_hash (S2 fix — "
                          "exact-hash dedup on original code text)")
             else:
                 self.log("   ⚠  'snippet_hash' column absent in precomputed "
@@ -1534,11 +2404,113 @@ class MLEngine:
             df = (df.drop_duplicates(subset=["SNIPPET"])
                     .dropna(subset=["SNIPPET", "Mtags", "Btags"])
                     .reset_index(drop=True))
+            self.log("   Dedup method (2a) : SHA-256 exact-hash dedup on "
+                     "raw SNIPPET text")
+        n_exact = len(df)
+        self.results["n_dedup_exact"] = n_exact
+        self.log(f"   After exact dedup : {n_exact:,}  "
+                 f"(removed {n_raw - n_exact:,})")
+
+        # ── STEP 2a export — download deduplicated dataset (2a only) ──
+        self._export_dedup_dataset(df, p["csv_path"], stage="2a", pct=6)
+
+        # ── 2b. Tree-sitter AST tokenization + MinHash-LSH near-dup dedup ──
+        # (V17-10 — replaces the exact canonical-hash match of V17-6a/b.
+        # V17-6b is retained: each near-dup cluster is thinned to
+        # `max_keep_per_cluster` rows instead of a single survivor.)
+        self.check_stop()
+        max_keep_per_cluster = int(p.get("max_keep_per_cluster", 2))
+        jaccard_threshold = float(
+            p.get("jaccard_threshold", JACCARD_THRESHOLD_DEFAULT))
+        if not (0.0 < jaccard_threshold <= 1.0):
+            raise ValueError("Jaccard similarity threshold must be in "
+                             f"(0, 1]; got {jaccard_threshold}.")
+        self.results["max_keep_per_cluster"] = max_keep_per_cluster
+        self.results["jaccard_threshold"] = jaccard_threshold
+        ft_col = "FILE TYPE" if "FILE TYPE" in df.columns else None
+        if "SNIPPET" in df.columns:
+            if not _DATASKETCH_AVAILABLE:
+                raise RuntimeError(
+                    "STEP 2b (MinHash-LSH near-duplicate removal) requires "
+                    "the 'datasketch' package, which is not installed.\n"
+                    "Install it with:  pip install datasketch")
+            self.log("   Dedup method (2b) : Tree-sitter AST tokenization "
+                     "(literal constants, variable identifiers and comments "
+                     "stripped) + MinHash-LSH near-duplicate detection")
+            self.log(f"   Jaccard threshold : {jaccard_threshold:.2f}  "
+                     f"({MINHASH_NUM_PERM} permutations, "
+                     f"{MINHASH_SHINGLE_K}-token shingles; up to "
+                     f"{max_keep_per_cluster} row(s) kept per near-dup "
+                     f"cluster)  [V17-10]")
+            self.progress(7, "AST MinHash-LSH near-dup removal …")
+            snippets_for_dedup = df["SNIPPET"].astype(str).tolist()
+            file_types_for_dedup = (df[ft_col].astype(str).tolist()
+                                     if ft_col else [""] * len(df))
+            mtags_for_dedup = (df["Mtags"].tolist()
+                               if "Mtags" in df.columns else None)
+            btags_for_dedup = (df["Btags"].tolist()
+                               if "Btags" in df.columns else None)
+
+            def _near_dup_progress(done, total):
+                self.check_stop()
+                pct = 7 + int(2 * done / max(total, 1))
+                self.progress(pct, f"AST MinHash-LSH near-dup … "
+                                   f"{done:,}/{total:,}")
+
+            keep_mask, n_near_removed, n_ast_used, n_label_conflicts = (
+                ast_minhash_lsh_dedup(
+                    snippets_for_dedup, file_types_for_dedup,
+                    jaccard_threshold=jaccard_threshold,
+                    progress_cb=_near_dup_progress,
+                    mtags=mtags_for_dedup, btags=btags_for_dedup,
+                    max_keep_per_cluster=max_keep_per_cluster))
+            df = df.loc[keep_mask].reset_index(drop=True)
+            # Report ACTUAL runtime coverage, not just import status:
+            # tree-sitter-languages can import successfully yet still
+            # fail on every parse call under an incompatible
+            # tree-sitter version, in which case every snippet
+            # silently used the regex fallback despite a clean import.
+            n_total = len(snippets_for_dedup)
+            if n_ast_used < n_total:
+                self.log(f"   ⚠  Tree-sitter AST walk used for "
+                         f"{n_ast_used:,}/{n_total:,} snippets; "
+                         f"remaining {n_total - n_ast_used:,} used the "
+                         f"regex-token fallback (missing grammar for "
+                         f"that FILE TYPE, parse failure, or "
+                         f"tree-sitter/tree-sitter-languages version "
+                         f"mismatch — pin tree-sitter==0.21.3).")
+            else:
+                self.log(f"   Tree-sitter AST walk used for all "
+                         f"{n_total:,} snippets (0 regex fallbacks).")
+            self.results["n_near_duplicates_removed"] = n_near_removed
+            self.results["n_near_dup_label_conflicts"] = n_label_conflicts
+            self.log(f"   Near-duplicates   : {n_near_removed:,} removed "
+                     f"(MinHash-LSH, Jaccard ≥ {jaccard_threshold:.2f}, "
+                     f"max {max_keep_per_cluster}/cluster kept)")
+            if n_label_conflicts:
+                self.log(f"   ⚠  {n_label_conflicts:,} of those removed "
+                         f"near-dup rows had a DIFFERENT Btag/Mtag label "
+                         f"than their cluster representative (possible "
+                         f"source-dataset annotation noise) — worth a "
+                         f"manual spot-check before relying on Table "
+                         f"4-style results.")
+        else:
+            self.results["n_near_duplicates_removed"] = 0
+            self.results["n_near_dup_label_conflicts"] = 0
+            self.log("   ⚠  'SNIPPET' column absent — STEP 2b (AST "
+                     "MinHash-LSH near-duplicate removal) skipped; only "
+                     "exact-hash dedup (2a) applied. Load/export the raw "
+                     "dataset with a SNIPPET column to enable near-"
+                     "duplicate detection.")
+
+        # ── STEP 2b export — download deduplicated dataset (2a+2b) ──
+        self._export_dedup_dataset(df, p["csv_path"], stage="2b", pct=9)
+
         self.df_dedup = df.copy()
         n_dedup = len(df)
         self.results["n_dedup"] = n_dedup
-        self.log(f"   After dedup       : {n_dedup:,}  "
-                 f"(removed {n_raw - n_dedup:,})")
+        self.log(f"   After dedup (2a+2b): {n_dedup:,}  "
+                 f"(removed {n_raw - n_dedup:,} total)")
 
         btag_dedup  = df["Btags"].value_counts().to_dict()
         mtag_dedup_n = df["Mtags"].nunique()
@@ -1601,36 +2573,93 @@ class MLEngine:
         _shuf_global      = bool(p.get("shuffle", True))
 
         def _make_shared_split(y_b_arr, y_m_arr, n_total):
-            """C1 fix: stratify on Mtag; C3 fix: one split for all rounds."""
+            """C1 fix: stratify on Mtag; C3 fix: one split for all rounds.
+            S4 fix: GUARANTEED per-class coverage — every one of the
+            n_multi Mtag classes is forced to contribute at least one
+            row to BOTH the train and the test partition, by allocating
+            each class's rows independently (rather than relying on
+            sklearn's train_test_split(stratify=...), whose rounding of
+            the target test fraction can silently drop a rare class from
+            one side of the split, or raise ValueError and fall back to
+            a coarser Btag/unstratified split that offers no per-class
+            guarantee at all).
+
+            For a class with >=2 rows: n_test_c = round(n_c * test_size),
+            clamped to [1, n_c-1] so at least one row lands on each side.
+            For a class with exactly 1 row, a split covering both sides
+            is mathematically impossible; that single row is kept in
+            training and the class is reported as a singleton so the run
+            log/report make the exception explicit rather than silently
+            failing the guarantee.
+            """
             idx = np.arange(n_total)
+            rng = np.random.RandomState(SEED)
+            classes = np.unique(y_m_arr)
+            idx_tr_parts, idx_te_parts = [], []
+            singleton_classes = []
+
+            for cls in classes:
+                cls_idx = idx[y_m_arr == cls]
+                if _shuf_global:
+                    cls_idx = cls_idx.copy()
+                    rng.shuffle(cls_idx)
+                n_c = len(cls_idx)
+
+                if n_c == 1:
+                    idx_tr_parts.append(cls_idx)
+                    singleton_classes.append(int(cls))
+                    continue
+
+                n_test_c = int(round(n_c * _test_size_global))
+                n_test_c = max(1, min(n_c - 1, n_test_c))  # >=1 on each side
+                idx_te_parts.append(cls_idx[:n_test_c])
+                idx_tr_parts.append(cls_idx[n_test_c:])
+
+            idx_tr = (np.concatenate(idx_tr_parts) if idx_tr_parts
+                      else np.array([], dtype=int))
+            idx_te = (np.concatenate(idx_te_parts) if idx_te_parts
+                      else np.array([], dtype=int))
+
             if _shuf_global:
-                try:
-                    idx_tr, idx_te = train_test_split(
-                        idx, test_size=_test_size_global,
-                        random_state=SEED, stratify=y_m_arr)
-                    desc = (f"shuffled, stratified across "
-                            f"{n_multi} Mtag classes (C1 fix)")
-                except ValueError:
-                    try:
-                        idx_tr, idx_te = train_test_split(
-                            idx, test_size=_test_size_global,
-                            random_state=SEED, stratify=y_b_arr)
-                        desc = ("shuffled, stratified on Btag "
-                                "(Mtag fallback — some CWE classes <2 samples)")
-                    except ValueError:
-                        idx_tr, idx_te = train_test_split(
-                            idx, test_size=_test_size_global,
-                            random_state=SEED)
-                        desc = "shuffled, unstratified (very small dataset)"
+                rng.shuffle(idx_tr)
+                rng.shuffle(idx_te)
+                base_desc = (f"shuffled, per-class allocation — all "
+                             f"{n_multi} Mtag classes guaranteed in BOTH "
+                             f"train and test")
             else:
-                n_tr   = int(n_total * (1 - _test_size_global))
-                idx_tr = idx[:n_tr]
-                idx_te = idx[n_tr:]
-                desc   = "sequential, file order preserved"
+                idx_tr = np.sort(idx_tr)
+                idx_te = np.sort(idx_te)
+                base_desc = (f"sequential (file order within class), "
+                             f"per-class allocation — all {n_multi} Mtag "
+                             f"classes guaranteed in BOTH train and test")
+
+            if singleton_classes:
+                desc = (f"{base_desc}, except {len(singleton_classes)} "
+                        f"singleton class(es) (1 total sample — kept in "
+                        f"train, cannot also appear in test): "
+                        f"{[le_m.classes_[c] for c in singleton_classes]}")
+            else:
+                desc = base_desc
+
             return idx_tr, idx_te, desc
 
         idx_tr_shared, idx_te_shared, split_desc_shared = \
             _make_shared_split(y_b, y_m, len(df))
+
+        # Verify the guarantee actually holds and record it explicitly.
+        n_classes_in_train = int(np.unique(y_m[idx_tr_shared]).size)
+        n_classes_in_test  = int(np.unique(y_m[idx_te_shared]).size)
+        self.results["n_multi_classes_in_train"] = n_classes_in_train
+        self.results["n_multi_classes_in_test"]  = n_classes_in_test
+        self.log(f"   Mtag classes in train : {n_classes_in_train}/{n_multi}")
+        self.log(f"   Mtag classes in test  : {n_classes_in_test}/{n_multi}")
+        if n_classes_in_train < n_multi or n_classes_in_test < n_multi:
+            self.log(f"   ⚠️  {n_multi - n_classes_in_train} class(es) "
+                     f"missing from train, {n_multi - n_classes_in_test} "
+                     f"missing from test — see singleton-class note above.")
+        else:
+            self.log(f"   ✅  All {n_multi} Mtag classes confirmed present "
+                     f"in both the 80% training and 20% testing partitions.")
 
         train_pct_g = (1 - _test_size_global) * 100
         test_pct_g  = _test_size_global * 100
@@ -1658,6 +2687,13 @@ class MLEngine:
         # the NumPy version on every run — and has been removed.
         snippets_all = df["SNIPPET"].astype(str).tolist() \
                        if "SNIPPET" in df.columns else None
+
+        # ── STEP 3b — EXPORT DATA-SPLIT STATISTICS (.xlsx) ────────
+        # Per-Mtag-class Total / Train(80%) / Test(20%) breakdown of
+        # the shared split computed just above. Non-fatal: a failure
+        # here logs a warning and the pipeline continues into STEP 4.
+        self._export_datasplit_statistics(
+            le_m, y_m, idx_tr_shared, idx_te_shared, p["csv_path"])
 
         # ── STEP 4 — GraphCodeBERT embedding extraction ──────────
         # NOTE: CodeBERT fine-tuned rounds (R1) load the CB model internally
@@ -1709,8 +2745,8 @@ class MLEngine:
             self.log("🧠  STEP 4 — GraphCodeBERT embedding extraction …")
             self.log(f"   Model    : {GRAPHCODEBERT_MODEL_NAME}")
             self.log("   Scope    : full corpus → sliced by shared split indices")
-            self.log("   Rounds   : R2 (fine-tune), R3 (flat 768-dim), "
-                     "R4 (hierarchical 780-dim)")
+            self.log("   Rounds   : R2 (fine-tune), R3 (flat, 780-dim + HC, "
+                     "V17-6c), R4 (hierarchical, 780-dim + HC)")
             self.progress(14, f"Loading {GRAPHCODEBERT_MODEL_NAME} …")
             self.check_stop()
 
@@ -1758,7 +2794,10 @@ class MLEngine:
                              f"{_total:.2f} GB  "
                              f"({100*_used/_total:.0f}%)")
 
-                # Handcrafted features (12-dim) — needed for Round 4 only
+                # Handcrafted features (12-dim) — needed for Round 3 and
+                # Round 4 (V17-6c fix: Round 3 was GCB-embedding-only
+                # through V17-6b, see module-level comment near
+                # FEATURE_NAMES_780)
                 self.progress(26, "Extracting handcrafted features (12-dim) …")
                 self.check_stop()
                 t0    = time.time()
@@ -1780,22 +2819,21 @@ class MLEngine:
             self.results["feature_shape"]   = list(X_all.shape)
 
             # Slice GCB matrices using shared split indices
-            Xtr_shared     = X_all[idx_tr_shared]   # 780-dim → Round 4
+            # V17-6c fix: Round 3 now trains on the same 780-dim matrix
+            # as Round 4 — the separate 768-dim-only Xtr_emb_shared /
+            # Xte_emb_shared slice (used only by Round 3 through V17-6b)
+            # is retired.
+            Xtr_shared     = X_all[idx_tr_shared]   # 780-dim → Round 3 & 4
             Xte_shared     = X_all[idx_te_shared]
-            Xtr_emb_shared = X_emb[idx_tr_shared]   # 768-dim → Round 3
-            Xte_emb_shared = X_emb[idx_te_shared]
 
-            self.log(f"   GCB 780-dim train : {Xtr_shared.shape}  [→ Round 4]")
-            self.log(f"   GCB 780-dim test  : {Xte_shared.shape}  [→ Round 4]")
-            self.log(f"   GCB 768-dim train : {Xtr_emb_shared.shape}  [→ Round 3]")
-            self.log(f"   GCB 768-dim test  : {Xte_emb_shared.shape}  [→ Round 3]")
+            self.log(f"   GCB 780-dim train : {Xtr_shared.shape}  [→ Round 3, Round 4]")
+            self.log(f"   GCB 780-dim test  : {Xte_shared.shape}  [→ Round 3, Round 4]")
         else:
             # Only Round 1 (CB fine-tuned) selected — GCB extraction not needed
             self.log("   ⏭️  STEP 4 skipped — GCB embeddings not required "
                      "(only Round 1 CB fine-tune selected)")
             # Provide empty placeholders so downstream round guards work safely
             Xtr_shared = Xte_shared = None
-            Xtr_emb_shared = Xte_emb_shared = None
             X_emb = X_all = None
 
         # ── STEP 5 — CodeBERT fine-tuning data note ──────────────
@@ -2007,6 +3045,7 @@ class MLEngine:
                 "cm_labels":       label_names_m,
                 "tag":             tag,
                 "smote_tag":       smote_tag,
+                "_clf":            clf,   # STEP 10b — feature importance / SHAP
             }
 
         def run_round_flat(Xtr, Xte, y_b_tr, y_b_te, y_m_tr, y_m_te,
@@ -2161,6 +3200,7 @@ class MLEngine:
                 "cm_labels":       label_names_m,
                 "tag":             tag,
                 "smote_tag":       smote_tag,
+                "_clf":            clf,   # STEP 10b — feature importance / SHAP
             }
 
         # ── binary-only sub-round helper (Round 3A / 4A standalone) ─
@@ -2286,9 +3326,12 @@ class MLEngine:
 
         pct = 32   # M4 fix: budget starts at 32% after Steps 1-5
 
-        # Pre-slice 768-dim embedding matrix for XGBoost rounds (R3/R4)
-        Xtr_emb_shared = X_emb[idx_tr_shared]
-        Xte_emb_shared = X_emb[idx_te_shared]
+        # V17-6c fix: removed a redundant re-slice of a retired 768-dim-
+        # only embedding matrix here (Xtr_shared/Xte_shared, sliced once
+        # in STEP 4 above, are what Round 3 and Round 4 both use now).
+        # That re-slice also indexed X_emb unconditionally, which is
+        # None whenever only Round 1 is selected (_need_gcb False) —
+        # a latent crash retired along with the dead code.
 
         # ── Retrieve raw snippets for fine-tuned rounds (R1/R2) ──────
         # snips_tr / snips_te were already prepared in STEP 3 above.
@@ -2433,35 +3476,47 @@ class MLEngine:
             pct += 11
 
         # ════════════════════════════════════════════════════════════
-        #  STEP 8 — ROUND 3: GraphCodeBERT + XGBoost  (768-dim, no HC)
-        #  Data source : STEP 5 (GCB embeddings, 768-dim, train + test)
-        #  Round 3A    : Binary standalone  (Benign / Vulnerable, 768-dim)
+        #  STEP 8 — ROUND 3: GraphCodeBERT + XGBoost  (780-dim + HC)
+        #  Data source : STEP 5 (GCB 780-dim + 12-dim HC = 780-dim,
+        #                same matrix as Round 4 — V17-6c fix)
+        #  Round 3A    : Binary standalone  (Benign / Vulnerable, 780-dim)
         #  Round 3B    : Multi-class Flat  (ALL 69 Mtag classes incl.
         #                Benign; Stage-1 gate → flat Stage-2)
         #  C-NEW fix   : Round 3B uses run_round_flat() so Benign is in
         #                Stage-2 training distribution (not excluded as
         #                in Round 4B).
+        #  V17-6c fix  : Round 3A/3B now train/test on the same 780-dim
+        #                (768 GCB + 12 handcrafted) matrix as Round 4,
+        #                instead of the retired 768-dim embedding-only
+        #                matrix — so a Round 3 vs. Round 4 comparison
+        #                isolates the flat-vs-hierarchical architecture
+        #                variable rather than also varying the feature
+        #                set. This also means Round 3B's feature-
+        #                importance/SHAP step (STEP 10b) now produces
+        #                the same embedding-vs-handcrafted group-
+        #                importance breakdown Round 4B already got.
         # ════════════════════════════════════════════════════════════
         if do_r3_flat:
             self.log("━" * 58)
             self.log("📊  STEP 8 — ROUND 3: GraphCodeBERT + XGBoost "
-                     "(768-dim, no handcrafted features)")
-            self.log(f"   Data source : STEP 5  (GCB 768-dim embeddings, "
-                     f"train {Xtr_emb_shared.shape[0]:,} / "
-                     f"test {Xte_emb_shared.shape[0]:,})")
+                     "(780-dim: 768 GCB + 12 handcrafted)")
+            self.log(f"   Data source : STEP 5  (GCB 780-dim features, "
+                     f"train {Xtr_shared.shape[0]:,} / "
+                     f"test {Xte_shared.shape[0]:,})")
             self.log(f"   Model    : {GRAPHCODEBERT_MODEL_NAME}  (frozen extractor)")
-            self.log(f"   Features : GCB [CLS] 768-dim only — no handcrafted features")
-            self.results["round3_feature_shape"] = list(X_emb.shape)
+            self.log(f"   Features : GCB [CLS] 768-dim + 12-dim handcrafted "
+                     f"structural features = 780-dim  [V17-6c fix]")
+            self.results["round3_feature_shape"] = list(X_all.shape)
 
-            # ── 3A — Binary standalone (Benign / Vulnerable, 768-dim) ──
+            # ── 3A — Binary standalone (Benign / Vulnerable, 780-dim) ──
             self.log("━" * 40)
-            self.log("   Round 3A — Binary standalone  (768-dim)")
+            self.log("   Round 3A — Binary standalone  (780-dim)")
             if do_no_sm:
                 m = _binary_only_round(
-                    Xtr_emb_shared, Xte_emb_shared,
+                    Xtr_shared, Xte_shared,
                     y_b_tr_shared, y_b_te_shared,
                     le_b, smote=False,
-                    tag="Round 3A — Binary (768-dim)",
+                    tag="Round 3A — Binary (780-dim)",
                     pct_start=pct, pct_end=pct + 10,
                     n_est=n_est, max_depth=max_depth,
                     lr=xgb_lr, subsample=subsample,
@@ -2471,10 +3526,10 @@ class MLEngine:
             self.check_stop()
             if do_smote:
                 m = _binary_only_round(
-                    Xtr_emb_shared, Xte_emb_shared,
+                    Xtr_shared, Xte_shared,
                     y_b_tr_shared, y_b_te_shared,
                     le_b, smote=True,
-                    tag="Round 3A — Binary (768-dim)",
+                    tag="Round 3A — Binary (780-dim)",
                     pct_start=pct, pct_end=pct + 12,
                     n_est=n_est, max_depth=max_depth,
                     lr=xgb_lr, subsample=subsample,
@@ -2488,30 +3543,40 @@ class MLEngine:
             # ── 3B — Multi-class Flat (ALL rows, 69 Mtag classes) ──────
             self.log("━" * 40)
             self.log(f"   Round 3B — Multi-class Flat  "
-                     f"({n_multi} Mtag classes incl. Benign, 768-dim)")
+                     f"({n_multi} Mtag classes incl. Benign, 780-dim)")
             self.log(f"   Inference: Stage-1 gate → flat Stage-2 (Benign eligible)")
             if do_no_sm:
-                m = run_round_flat(Xtr_emb_shared, Xte_emb_shared,
+                m = run_round_flat(Xtr_shared, Xte_shared,
                                     y_b_tr_shared, y_b_te_shared,
                                     y_m_tr_shared, y_m_te_shared,
-                                    "Round 3B — Multi-class Flat (768-dim)",
+                                    "Round 3B — Multi-class Flat (780-dim)",
                                     list(le_m.classes_),
                                     list(le_b.classes_),
                                     smote=False,
                                     pct_start=pct, pct_end=pct + 12)
                 self.results["R3B_noSMOTE"] = m
+                self._run_feature_importance_analysis(
+                    m["_clf"], Xte_shared, y_b_te_shared,
+                    FEATURE_NAMES_780,
+                    tag="Round 3B — Flat, No SMOTE (780-dim)",
+                    result_key="R3B_noSMOTE", mode="flat", pct=pct + 12)
                 pct += 12
             self.check_stop()
             if do_smote:
-                m = run_round_flat(Xtr_emb_shared, Xte_emb_shared,
+                m = run_round_flat(Xtr_shared, Xte_shared,
                                     y_b_tr_shared, y_b_te_shared,
                                     y_m_tr_shared, y_m_te_shared,
-                                    "Round 3B — Multi-class Flat (768-dim)",
+                                    "Round 3B — Multi-class Flat (780-dim)",
                                     list(le_m.classes_),
                                     list(le_b.classes_),
                                     smote=True,
                                     pct_start=pct, pct_end=pct + 14)
                 self.results["R3B_SMOTE"] = m
+                self._run_feature_importance_analysis(
+                    m["_clf"], Xte_shared, y_b_te_shared,
+                    FEATURE_NAMES_780,
+                    tag="Round 3B — Flat, With SMOTE (780-dim)",
+                    result_key="R3B_SMOTE", mode="flat", pct=pct + 14)
                 pct += 14
 
         # ════════════════════════════════════════════════════════════
@@ -2577,6 +3642,12 @@ class MLEngine:
                               smote=False,
                               pct_start=pct, pct_end=pct + 12)
                 self.results["R4B_noSMOTE"] = m
+                self._run_feature_importance_analysis(
+                    m["_clf"], Xte_shared, y_b_te_shared,
+                    FEATURE_NAMES_780,
+                    tag="Round 4B — Hierarchical, No SMOTE (780-dim)",
+                    result_key="R4B_noSMOTE", mode="hierarchical",
+                    pct=pct + 12)
                 pct += 12
             self.check_stop()
             if do_smote:
@@ -2589,6 +3660,12 @@ class MLEngine:
                               smote=True,
                               pct_start=pct, pct_end=pct + 14)
                 self.results["R4B_SMOTE"] = m
+                self._run_feature_importance_analysis(
+                    m["_clf"], Xte_shared, y_b_te_shared,
+                    FEATURE_NAMES_780,
+                    tag="Round 4B — Hierarchical, With SMOTE (780-dim)",
+                    result_key="R4B_SMOTE", mode="hierarchical",
+                    pct=pct + 14)
                 pct += 14
 
         # ── STEP 10 — Generate PDF report + comparison charts ───
@@ -2694,7 +3771,7 @@ class MLEngine:
                 r3_keys.append(("3B SMOTE",    "R3B_SMOTE"))
         if r3_keys:
             self.figures.append(("Round 3 — GraphCodeBERT + XGBoost",
-                self._metric_bar("Round 3 — GraphCodeBERT + XGBoost (768-dim)",
+                self._metric_bar("Round 3 — GraphCodeBERT + XGBoost (780-dim)",
                                   r3_keys, self.results)))
 
         if do_r4_hier:
@@ -2929,6 +4006,69 @@ class PDFReporter:
             [3.6*cm, 1.3*cm, 1.3*cm, 1.3*cm, 1.3*cm,
              1.9*cm, 1.7*cm, 1.5*cm, 1.7*cm])
 
+    # ── STEP 10b — feature-importance / SHAP section ───────────────
+    def _shap_section(self, shap_key, section_label, top_n=10):
+        """Build the flowables for one round variant's feature-
+        importance / SHAP results (self.r[f"{key}_shap"], written by
+        MLEngine._run_feature_importance_analysis). Returns None if
+        that analysis didn't run (e.g. the round itself was skipped)."""
+        d = self.r.get(shap_key)
+        if not d:
+            return None
+        S = self.styles
+        method_label = (
+            "SHAP TreeExplainer — mean |SHAP value| per feature"
+            if d["method"] == "shap" else
+            "XGBoost gain-based feature_importances_ "
+            "(shap package unavailable — fallback)")
+
+        flow = [
+            Paragraph(f"{section_label} — Feature Importance",
+                     S["SubHead"]),
+            Paragraph(
+                f"Attribution method: {method_label}. Stage-1 (binary "
+                f"gate) explained on {d['stage1_n_samples']:,} sampled "
+                f"test rows; Stage-2 (multi-class) explained on "
+                f"{d['stage2_n_samples']:,} sampled rows.",
+                S["Body"]),
+            Spacer(1, 0.15*cm),
+        ]
+
+        s1_tbl = [["Rank", "Stage-1 feature (binary gate)", "Importance"]]
+        for i, (name, val) in enumerate(d["stage1_top"][:top_n], 1):
+            s1_tbl.append([str(i), name, f"{val:.4f}"])
+        if len(s1_tbl) > 1:
+            flow.append(self._table(s1_tbl, [1.5*cm, 9.5*cm, 3*cm]))
+            flow.append(self._fig_to_image(d["fig_stage1"]))
+            flow.append(Paragraph(
+                f"Figure: {section_label} — Stage-1 top-{top_n} "
+                f"feature importance", S["Caption"]))
+            flow.append(Spacer(1, 0.25*cm))
+
+        s2_tbl = [["Rank", "Stage-2 feature (multi-class)", "Importance"]]
+        for i, (name, val) in enumerate(d["stage2_top"][:top_n], 1):
+            s2_tbl.append([str(i), name, f"{val:.4f}"])
+        if len(s2_tbl) > 1:
+            flow.append(self._table(s2_tbl, [1.5*cm, 9.5*cm, 3*cm]))
+            flow.append(self._fig_to_image(d["fig_stage2"]))
+            flow.append(Paragraph(
+                f"Figure: {section_label} — Stage-2 top-{top_n} "
+                f"feature importance", S["Caption"]))
+            flow.append(Spacer(1, 0.25*cm))
+
+        if d.get("group_importance"):
+            grp_tbl = [["Feature group", "Share of Stage-2 importance"]]
+            for lbl, frac in d["group_importance"].items():
+                grp_tbl.append([lbl, f"{frac*100:.1f}%"])
+            flow.append(self._table(grp_tbl, [11*cm, 5*cm]))
+            if d.get("fig_group") is not None:
+                flow.append(self._fig_to_image(d["fig_group"]))
+                flow.append(Paragraph(
+                    f"Figure: {section_label} — semantic-embedding vs. "
+                    f"handcrafted-structural contribution to Stage-2",
+                    S["Caption"]))
+        return flow
+
     def build(self):
         out_dir  = os.path.dirname(self.p["csv_path"])
         pdf_path = os.path.join(out_dir, "VulnDetection_Report.pdf")
@@ -2976,10 +4116,20 @@ class PDFReporter:
                                            "export_cb_pre", False) else "No"],
             ["Export GCB features",    "Yes" if self.p.get(
                                            "export_gcb_pre", True) else "No"],
+            ["STEP 2b — Jaccard similarity threshold",
+             f"{self.r.get('jaccard_threshold', JACCARD_THRESHOLD_DEFAULT):.2f}"],
             ["Total samples",          f"{self.p['n_samples']:,}"],
             ["STEP 3 — Train split",   f"{100-int(float(self.p.get('test_size',0.2))*100)}%"],
             ["STEP 3 — Test split",    f"{int(float(self.p.get('test_size',0.2))*100)}%"],
             ["STEP 3 — Split strategy",self.r.get("split_desc", "—")],
+            ["STEP 3 — Mtag classes in train",
+             f"{self.r.get('n_multi_classes_in_train','—')}/"
+             f"{self.r.get('n_multi_classes','—')}"],
+            ["STEP 3 — Mtag classes in test",
+             f"{self.r.get('n_multi_classes_in_test','—')}/"
+             f"{self.r.get('n_multi_classes','—')}"],
+            ["STEP 3b — Data-split statistics file",
+             self.r.get("datasplit_statistics_path", "—")],
             ["STEP 4 — GCB model",     GRAPHCODEBERT_MODEL_NAME],
             ["STEP 5 — CB fine-tune",  "Loaded on-demand inside run_bert_round()"],
             ["STEP 6 — Round 1 (CB FT)",
@@ -3007,10 +4157,22 @@ class PDFReporter:
         story.append(Paragraph(
             "The V12 pipeline follows ten sequential steps. "
             "Step 1 loads the raw dataset (UAVulDB01, SARD + NVD/CVE). "
-            "Step 2 deduplicates by SHA-256 snippet hash. "
-            "Step 3 applies a single Mtag-stratified 80/20 split "
-            "(SEED=42) shared by all four rounds, and prepares raw code "
-            "snippet lists for fine-tuned rounds. "
+            "Step 2 deduplicates in two passes: (2a) exact SHA-256 "
+            "snippet-hash dedup, then (2b) near-duplicate removal: "
+            "snippets are tokenized into Tree-sitter AST "
+            "representations (literal constants, variable identifiers "
+            "and comments stripped) and near-duplicates are identified "
+            "with MinHash Locality-Sensitive Hashing (LSH) at a Jaccard "
+            f"similarity threshold of "
+            f"{self.r.get('jaccard_threshold', JACCARD_THRESHOLD_DEFAULT):.2f}"
+            f", keeping up to {self.r.get('max_keep_per_cluster', 2)} "
+            "row(s) per near-dup cluster. "
+            "Step 3 applies a single 80/20 split (SEED=42) shared by all "
+            "four rounds, using guaranteed per-class allocation so that "
+            f"every one of the {self.r.get('n_multi_classes', 'N')} Mtag "
+            "classes is represented in both the training and testing "
+            "partitions, and prepares raw code snippet lists for "
+            "fine-tuned rounds. "
             "Step 4 runs GraphCodeBERT (microsoft/graphcodebert-base) as a "
             "frozen feature extractor over the full corpus; the resulting "
             "768-dim [CLS] embeddings are concatenated with 12-dim "
@@ -3029,11 +4191,12 @@ class PDFReporter:
             "seeded DataLoader. "
             "Step 7 (Round 2) applies the identical fine-tuning setup "
             "with GraphCodeBERT as the backbone. "
-            "Step 8 (Round 3) trains two XGBoost classifiers on GCB "
-            "768-dim embeddings: Round 3A is a standalone binary "
-            "classifier (Benign / Vulnerable); Round 3B is a flat "
-            "multi-class classifier over all 69 Mtag classes including "
-            "Benign, gated by the Stage-1 binary prediction. "
+            "Step 8 (Round 3) trains two XGBoost classifiers on the same "
+            "780-dim features as Round 4 (768-dim GCB embedding + 12-dim "
+            "handcrafted structural features, V17-6c fix): Round 3A is a "
+            "standalone binary classifier (Benign / Vulnerable); Round 3B "
+            "is a flat multi-class classifier over all 69 Mtag classes "
+            "including Benign, gated by the Stage-1 binary prediction. "
             "Step 9 (Round 4) trains a two-stage hierarchical XGBoost "
             "on 780-dim features: Stage-1 binary gate then Stage-2 "
             "multi-class on Vulnerable rows only. "
@@ -3114,7 +4277,18 @@ class PDFReporter:
         dstat = [
             ["Statistic", "Value"],
             ["Raw samples",               f"{self.r.get('n_raw', 'N/A'):,}"],
-            ["After deduplication",       f"{self.r.get('n_dedup', 'N/A'):,}"],
+            ["After exact-hash dedup (2a)", f"{self.r.get('n_dedup_exact', 'N/A'):,}"],
+            ["STEP 2a export — deduplicated dataset file",
+             self.r.get("dedup_2a_dataset_path", "—")],
+            [f"AST near-dups removed (2b, MinHash-LSH, Jaccard >= "
+             f"{self.r.get('jaccard_threshold', JACCARD_THRESHOLD_DEFAULT):.2f}"
+             f", max {self.r.get('max_keep_per_cluster', 2)}/cluster kept)",
+             f"{self.r.get('n_near_duplicates_removed', 'N/A'):,}"],
+            ["  of which: Btag/Mtag label conflict vs. cluster representative",
+             f"{self.r.get('n_near_dup_label_conflicts', 0):,}"],
+            ["After deduplication (2a+2b)", f"{self.r.get('n_dedup', 'N/A'):,}"],
+            ["STEP 2b export — deduplicated dataset file",
+             self.r.get("dedup_2b_dataset_path", "—")],
             ["Working set size",          f"{self.r.get('n_working', 'N/A'):,}"],
             ["Multi-class categories",    str(self.r.get('mtag_working_n', 'N/A'))],
             ["Feature matrix shape (R1 / R2)", str(self.r.get("feature_shape", "N/A"))],
@@ -3224,7 +4398,7 @@ class PDFReporter:
                     f"({len(cm_labels)} classes, test set)", S["Caption"]))
                 story.append(self._confusion_matrix_table(conf_mat, cm_labels))
 
-        # ── Round 3: GraphCodeBERT + XGBoost (768-dim, no HC) ─────────
+        # ── Round 3: GraphCodeBERT + XGBoost (780-dim + HC) ─────────
         r3a_keys = ["R3_noSMOTE", "R3_SMOTE"]
         r3b_keys = ["R3B_noSMOTE", "R3B_SMOTE"]
         r3a_avail = [k for k in r3a_keys if k in self.r]
@@ -3233,10 +4407,12 @@ class PDFReporter:
             story.append(PageBreak())
             story.append(Paragraph(
                 "Round 3 — GraphCodeBERT + XGBoost  "
-                "(768-dim, no handcrafted features)", S["SectionHead"]))
+                "(780-dim: 768 embedding + 12 handcrafted)", S["SectionHead"]))
             story.append(Paragraph(
-                "GraphCodeBERT (frozen) → [CLS] 768-dim embeddings only "
-                "— no handcrafted structural features. "
+                "GraphCodeBERT (frozen) → [CLS] 768-dim embedding, "
+                "concatenated with the same 12-dim handcrafted structural "
+                "features used by Round 4 (V17-6c fix — Round 3 trained on "
+                "the 768-dim embedding alone in earlier versions). "
                 "Round 3A: XGBoost binary classifier standalone "
                 "(Benign / Vulnerable). "
                 "Round 3B: Stage-1 binary gate → flat Stage-2 XGBoost "
@@ -3246,7 +4422,7 @@ class PDFReporter:
 
             if r3a_avail:
                 story.append(Paragraph(
-                    "Round 3A — Binary Classification (Standalone, 768-dim)",
+                    "Round 3A — Binary Classification (Standalone, 780-dim)",
                     S["SubHead"]))
                 for key in r3a_avail:
                     lbl = "Without SMOTE" if "noSMOTE" in key else "With SMOTE"
@@ -3258,7 +4434,7 @@ class PDFReporter:
             if r3b_avail:
                 story.append(Paragraph(
                     "Round 3B — Multi-class Classification "
-                    "(Flat, ALL rows, 768-dim)",
+                    "(Flat, ALL rows, 780-dim)",
                     S["SubHead"]))
                 for key in r3b_avail:
                     lbl = "Without SMOTE" if "noSMOTE" in key else "With SMOTE"
@@ -3284,6 +4460,13 @@ class PDFReporter:
                             S["Caption"]))
                         story.append(self._confusion_matrix_table(
                             conf_mat, cm_labels))
+                        story.append(Spacer(1, 0.3*cm))
+
+                    shap_flow = self._shap_section(
+                        f"{key}_shap", f"Round 3B — {lbl} (780-dim)")
+                    if shap_flow:
+                        story.append(PageBreak())
+                        story += shap_flow
                         story.append(Spacer(1, 0.3*cm))
 
             # R3 comparison if both SMOTE variants ran
@@ -3361,6 +4544,13 @@ class PDFReporter:
                             S["Caption"]))
                         story.append(self._confusion_matrix_table(
                             conf_mat, cm_labels))
+                        story.append(Spacer(1, 0.3*cm))
+
+                    shap_flow = self._shap_section(
+                        f"{key}_shap", f"Round 4B — {lbl} (780-dim)")
+                    if shap_flow:
+                        story.append(PageBreak())
+                        story += shap_flow
                         story.append(Spacer(1, 0.3*cm))
 
             # R4 comparison if both SMOTE variants ran
@@ -3551,13 +4741,14 @@ class App(tk.Tk):
         frame.pack(fill="x", padx=4, pady=4)
         return frame
 
-    def _hparam_entry(self, c, label, var, bounds_txt, note):
+    def _hparam_entry(self, c, label, var, bounds_txt, note,
+                      label_width=20, entry_width=10):
         row = tk.Frame(c, bg=CARD_BG)
         row.pack(fill="x", pady=(3, 0))
         tk.Label(row, text=label, bg=CARD_BG, fg=TEXT_MUTED,
-                 font=("Segoe UI", 9), width=20,
+                 font=("Segoe UI", 9), width=label_width,
                  anchor="w").pack(side="left")
-        ent = tk.Entry(row, textvariable=var, width=10,
+        ent = tk.Entry(row, textvariable=var, width=entry_width,
                        bg="#1E2233", fg=TEXT_PRIMARY,
                        insertbackground=TEXT_PRIMARY,
                        relief="flat", font=("Consolas", 9))
@@ -3797,8 +4988,42 @@ class App(tk.Tk):
                      bg=CARD_BG, fg=TEXT_MUTED,
                      font=("Segoe UI", 8)).pack(side="left")
 
-        tk.Label(c, text="Train/test split is stratified by binary class "
-                 "(Benign/Vulnerable) and performed BEFORE any SMOTE balancing.",
+        # ── STEP 2b — near-duplicate removal ─────────────────────
+        tk.Label(c, text="STEP 2b — near-duplicate removal "
+                 "(Tree-sitter AST + MinHash-LSH)",
+                 bg=CARD_BG, fg=TEXT_MUTED,
+                 font=("Segoe UI", 9, "bold"),
+                 wraplength=310, justify="left").pack(anchor="w",
+                                                      pady=(8, 0))
+        self._jaccard_threshold_var = tk.StringVar(
+            value=f"{JACCARD_THRESHOLD_DEFAULT:.2f}")
+        self._hparam_entry(
+            c, "Jaccard similarity threshold", self._jaccard_threshold_var,
+            "[0.5–1.0]",
+            "Two snippets are near-duplicates when the Jaccard similarity "
+            "of their AST token shingles (literal constants, variable "
+            "identifiers and comments stripped), estimated with MinHash-"
+            "LSH, is at or above this value. Default 0.90. Higher = "
+            "stricter (fewer rows removed); lower = more aggressive "
+            "(more rows removed).",
+            label_width=24, entry_width=6)
+
+        self._max_keep_per_cluster_var = tk.StringVar(value="2")
+        self._hparam_entry(
+            c, "Max kept per near-dup cluster", self._max_keep_per_cluster_var,
+            "[1–5]",
+            "How many rows of each near-duplicate cluster are kept: "
+            "1 = strict (single survivor per cluster); 2 (default) = "
+            "keep the first duplicate pair of every cluster, so scarce "
+            "classes don't lose every representative; higher values keep "
+            "more volume at the cost of more potential train/test "
+            "leakage if a cluster straddles the split.",
+            label_width=24, entry_width=6)
+
+        tk.Label(c, text="Train/test split uses guaranteed per-class "
+                 "allocation: every Mtag (CWE) class is forced into BOTH "
+                 "the train and test partitions, and is performed BEFORE "
+                 "any SMOTE balancing.",
                  bg=CARD_BG, fg=TEXT_MUTED,
                  font=("Segoe UI", 8), wraplength=310,
                  justify="left").pack(anchor="w", pady=(2, 6))
@@ -3956,9 +5181,9 @@ class App(tk.Tk):
                  "  Model: microsoft/graphcodebert-base\n"
                  "  \u26a0 Requires raw SNIPPET column  \xb7  GPU recommended",
                  self._do_r2_ft_var,  ACCENT_BLUE),
-                ("Round 3 — GraphCodeBERT + XGBoost  (768-dim)\n"
-                 "  GCB frozen \u2192 [CLS] 768-dim, no handcrafted features\n"
-                 "  3A: Binary standalone  (768-dim)\n"
+                ("Round 3 — GraphCodeBERT + XGBoost  (780-dim)\n"
+                 "  GCB frozen \u2192 [CLS] 768-dim + 12-dim HC = 780-dim\n"
+                 "  3A: Binary standalone  (780-dim)\n"
                  "  3B: Stage-1 gate + flat Stage-2 multi-class (69 cls)",
                  self._do_flat_var,   ACCENT_AMBER),
                 ("Round 4 — Two-Stage Hierarchical XGBoost  (780-dim)\n"
@@ -4238,6 +5463,12 @@ class App(tk.Tk):
                 # Dataset
                 "test_size":    float(self._test_size_var.get()) / 100.0,
                 "shuffle":      self._shuffle_var.get(),
+                # STEP 2b — near-duplicate removal (a decimal comma,
+                # e.g. "0,90", is accepted as well as "0.90")
+                "jaccard_threshold": float(
+                    self._jaccard_threshold_var.get().strip()
+                    .replace(",", ".")),
+                "max_keep_per_cluster": int(self._max_keep_per_cluster_var.get()),
                 # SMOTE
                 "smote_k":      int(self._smote_k_var.get()),
                 "smote_cap":    int(self._smote_cap_var.get()),
@@ -4255,6 +5486,16 @@ class App(tk.Tk):
         if not (0.05 <= p["test_size"] <= 0.5):
             messagebox.showerror("Invalid parameter",
                                  "Test set size (%) must be between 5 and 50.")
+            return None
+        if not (0.50 <= p["jaccard_threshold"] <= 1.0):
+            messagebox.showerror("Invalid parameter",
+                                 "Jaccard similarity threshold must be "
+                                 "between 0.50 and 1.00.")
+            return None
+        if not (1 <= p["max_keep_per_cluster"] <= 5):
+            messagebox.showerror("Invalid parameter",
+                                 "Max kept per near-dup cluster must be "
+                                 "between 1 and 5.")
             return None
         return p
 
